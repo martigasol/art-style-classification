@@ -7,6 +7,7 @@ def create_resnet_model(
     model_name="resnet18",
     feature_extraction=True,
     partial_finetuning=False,
+    unfreeze_layer3=False,
 ):
     """
     Crea una ResNet preentrenada i adapta l'última capa al nostre nombre de classes.
@@ -37,11 +38,18 @@ def create_resnet_model(
         for param in model.parameters():
             param.requires_grad = False
 
-        # Després descongelem només l'últim bloc de ResNet.
-        # layer4 conté característiques més específiques i és la part que volem adaptar a WikiArt.
+        # EXP16:
+        # Opcionalment descongelem layer3.
+        # Això permet adaptar característiques més intermèdies al domini WikiArt.
+        if unfreeze_layer3:
+            for param in model.layer3.parameters():
+                param.requires_grad = True
+
+        # Sempre descongelem layer4 en fine-tuning parcial.
+        # layer4 és el bloc més proper a la classificació final.
         for param in model.layer4.parameters():
             param.requires_grad = True
-
+            
     elif feature_extraction:
         # Mode anterior: només entrenem la capa final.
         for param in model.parameters():

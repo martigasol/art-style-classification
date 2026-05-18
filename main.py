@@ -50,33 +50,42 @@ def load_checkpoint(model, checkpoint_path, device):
 
 def main():
     config = {
-        "experiment_name": "exp14_top14_partial_ft_resnet50",
+        "experiment_name": "exp19_resnet50_336_aspect_crop_cache",
 
         "dataset_root": "/home/datasets/wikiart/",
         "model_name": "resnet50",
         "feature_extraction": False,
         "partial_finetuning": True,
+        "unfreeze_layer3": False,
 
         "epochs": 20,
         "batch_size": 64,
         "learning_rate": 2e-5,
         "weight_decay": 1e-4,
-        "early_stopping_patience": 3,
+        "early_stopping_patience": 4,
 
         "image_size": 336,
-        "val_size": 0.10,
-        "test_size": 0.05,
+        "val_size": 0.15,
+        "test_size": 0.15,
         "random_seed": 42,
         "num_workers": 8,
 
         "remove_duplicates": False,
         "check_corrupted": False,
 
+        # EXP19:
+        # Cache intermedi: costat curt = 336, aspect ratio preservat.
         "use_resized_cache": True,
-        "resized_cache_root": "/tmp/wikiart_336",
-        "force_rebuild_cache": False,
+        "resized_cache_root": "/tmp/wikiart_336_short_side",
+        "force_rebuild_cache": True,   # només primer cop
         "cache_num_workers": 12,
-        
+        "cache_resize_mode": "short_side",
+
+        # EXP19:
+        # Com que el cache té costat llarg variable,
+        # el DataLoader ha de fer crop 336x336.
+        "use_aspect_crop_cache": True,
+
         "use_top_k_classes": True,
         "top_k_classes": 14,
 
@@ -123,6 +132,7 @@ def main():
             image_size=config["image_size"],
             force_rebuild=config["force_rebuild_cache"],
             num_workers=config["cache_num_workers"],
+            cache_resize_mode=config.get("cache_resize_mode", "square")
         )
         resize_images_in_dataloader = False
 
@@ -213,6 +223,7 @@ def main():
         resize_images=resize_images_in_dataloader,
         use_augmentation=config["use_augmentation"],
         use_weighted_sampler=config["use_weighted_sampler"],
+        use_aspect_crop_cache=config.get("use_aspect_crop_cache", False),
     )
 
     # 4. Crear model ResNet
@@ -221,6 +232,7 @@ def main():
         model_name=config["model_name"],
         feature_extraction=config["feature_extraction"],
         partial_finetuning=config["partial_finetuning"],
+        unfreeze_layer3=config["unfreeze_layer3"],
     )
 
     model = model.to(device)

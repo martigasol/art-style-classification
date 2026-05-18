@@ -65,25 +65,85 @@ def get_cached_image_path(source_root, cache_root, image_path):
 
 
 def resize_and_save_cached_image(args):
-    source_root, cache_root, image_path, image_size, force_rebuild, jpeg_quality = args
+    source_root, cache_root, image_path, image_size, force_rebuild, jpeg_quality, cache_resize_mode = args
+
     cached_path = get_cached_image_path(source_root, cache_root, image_path)
     os.makedirs(os.path.dirname(cached_path), exist_ok=True)
 
     if os.path.exists(cached_path) and not force_rebuild:
         return "skipped_existing"
 
-    resampling = getattr(Image, "Resampling", Image).BILINEAR
-
     try:
         with Image.open(image_path) as img:
             img = img.convert("RGB")
-            img = img.resize((image_size, image_size), resampling)
+
+            if cache_resize_mode == "square":
+                # EXP14:
+                # Cache clàssic. Força totes les imatges a image_size x image_size.
+                img = img.resize(
+                    (image_size, image_size),
+                    resample=Image.Resampling.LANCZOS,
+                )
+
+            elif cache_resize_mode == "short_side":
+                # EXP19:
+                # Manté aspect ratio. El costat curt passa a ser image_size.
+                # El crop final es farà després al DataLoader.
+                img = resize_keep_aspect_short_side(img, image_size)
+
+            elif cache_resize_mode == "padding":
+                # EXP17:
+                # Manté aspect ratio i afegeix padding fins a image_size x image_size.
+                img = resize_with_padding(img, image_size)
+
+            else:
+                raise ValueError(f"cache_resize_mode no reconegut: {cache_resize_mode}")
+
             img.save(cached_path, format="JPEG", quality=jpeg_quality, optimize=True)
+
     except Exception:
         return "skipped_corrupted"
 
     return "processed"
 
+
+def resize_keep_aspect_short_side(img, image_size):
+    """
+    Redimensiona la imatge mantenint aspect ratio.
+    El costat curt passa a ser image_size.
+    El costat llarg queda variable.
+    """
+    img = img.convert("RGB")
+    width, height = img.size
+
+    if width <= height:
+        new_width = image_size
+        new_height = int(height * image_size / width)
+    else:
+        new_height = image_size
+        new_width = int(width * image_size / height)
+
+    img = img.resize((new_width, new_height), resample=Image.Resampling.LANCZOS)
+
+    return img
+
+def resize_with_padding(img, image_size):
+    """
+    Redimensiona mantenint aspect ratio i afegeix padding fins a image_size x image_size.
+    """
+    img = img.convert("RGB")
+
+    # Manté aspect ratio i posa la imatge dins d'un quadrat image_size x image_size.
+    img.thumbnail((image_size, image_size), Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (image_size, image_size), color=(128, 128, 128))
+
+    left = (image_size - img.width) // 2
+    top = (image_size - img.height) // 2
+
+    canvas.paste(img, (left, top))
+
+    return canvas
 
 def prepare_resized_cache_dataset(
     source_root,
@@ -92,6 +152,7 @@ def prepare_resized_cache_dataset(
     force_rebuild=False,
     jpeg_quality=90,
     num_workers=8,
+    cache_resize_mode="square",
 ):
     """
     Crea un cache local amb les imatges ja redimensionades.
@@ -100,7 +161,10 @@ def prepare_resized_cache_dataset(
     ni executar Resize sobre totes les imatges.
     """
     os.makedirs(cache_root, exist_ok=True)
-    marker_path = os.path.join(cache_root, f".cache_complete_{image_size}.txt")
+    marker_path = os.path.join(
+        cache_root,
+        f".cache_complete_{image_size}_{cache_resize_mode}.txt"
+    )
 
     if os.path.exists(marker_path) and not force_rebuild:
         print(f"Cache redimensionat trobat: {cache_root}")
@@ -122,7 +186,7 @@ def prepare_resized_cache_dataset(
 
     print(
         f"Creant cache redimensionat a {cache_root} "
-        f"({len(image_paths)} imatges, {image_size}x{image_size})"
+        f"({len(image_paths)} imatges, image_size={image_size}, mode={cache_resize_mode})"
     )
 
     stats = {
@@ -132,7 +196,15 @@ def prepare_resized_cache_dataset(
     }
 
     worker_args = [
-        (source_root, cache_root, image_path, image_size, force_rebuild, jpeg_quality)
+        (
+            source_root,
+            cache_root,
+            image_path,
+            image_size,
+            force_rebuild,
+            jpeg_quality,
+            cache_resize_mode,
+        )
         for image_path in image_paths
     ]
 
@@ -156,6 +228,7 @@ def prepare_resized_cache_dataset(
         marker.write(
             f"source_root={source_root}\n"
             f"image_size={image_size}\n"
+            f"cache_resize_mode={cache_resize_mode}\n"
             f"processed={stats['processed']}\n"
             f"skipped_existing={stats['skipped_existing']}\n"
             f"skipped_corrupted={stats['skipped_corrupted']}\n"
@@ -328,33 +401,28 @@ def print_split_summary(train_labels, val_labels, test_labels):
     print("===================================\n")
 
 
-def get_transforms(image_size=224, resize_images=True, use_augmentation=False):
-    """
-    Transforms per ResNet preentrenada.
-
-    Si use_augmentation=True:
-        apliquem augmentació suau només a train.
-
-    Important:
-        validation i test NO tenen augmentació.
-    """
-
+def get_transforms(
+    image_size=336,
+    resize_images=True,
+    use_augmentation=False,
+    use_aspect_crop_cache=False,
+):
     train_transforms = []
     val_test_transforms = []
 
-    if resize_images:
-        train_transforms.append(transforms.Resize((image_size, image_size)))
-        val_test_transforms.append(transforms.Resize((image_size, image_size)))
+    if use_aspect_crop_cache:
+        # El cache ja té costat curt = image_size.
+        # Ara només fem crop quadrat.
+        train_transforms.append(transforms.RandomCrop(image_size))
+        val_test_transforms.append(transforms.CenterCrop(image_size))
 
-    # Augmentació suau només per train.
-    # No fem canvis molt agressius perquè en WikiArt color/composició poden ser importants.
+    else:
+        if resize_images:
+            train_transforms.append(transforms.Resize((image_size, image_size)))
+            val_test_transforms.append(transforms.Resize((image_size, image_size)))
+
     if use_augmentation:
         train_transforms.extend([
-            transforms.RandomResizedCrop(
-                image_size,
-                scale=(0.75, 1.0),
-                ratio=(0.9, 1.1)
-            ),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(degrees=10),
             transforms.ColorJitter(
@@ -363,7 +431,6 @@ def get_transforms(image_size=224, resize_images=True, use_augmentation=False):
                 saturation=0.12,
                 hue=0.02,
             ),
-            transforms.RandomGrayscale(p=0.05),
         ])
 
     train_transforms.extend([
@@ -382,10 +449,8 @@ def get_transforms(image_size=224, resize_images=True, use_augmentation=False):
         ),
     ])
 
-    train_transform = transforms.Compose(train_transforms)
-    val_test_transform = transforms.Compose(val_test_transforms)
+    return transforms.Compose(train_transforms), transforms.Compose(val_test_transforms)
 
-    return train_transform, val_test_transform
 
 def create_dataloaders(
     train_paths,
@@ -400,7 +465,7 @@ def create_dataloaders(
     resize_images=True,
     use_augmentation=False,
     use_weighted_sampler=False,
-    
+    use_aspect_crop_cache=False,
 ):
     """
     Crea els Dataset i DataLoader de train, validation i test.
@@ -410,6 +475,7 @@ def create_dataloaders(
         image_size=image_size,
         resize_images=resize_images,
         use_augmentation=use_augmentation,
+        use_aspect_crop_cache=use_aspect_crop_cache,
     )
 
     train_dataset = ImageDataset(
