@@ -2,6 +2,7 @@ import torch.nn as nn
 from torchvision import models
 
 
+
 def create_resnet_model(
     num_classes,
     model_name="resnet18",
@@ -61,3 +62,25 @@ def create_resnet_model(
     model.fc = nn.Linear(in_features, num_classes)
 
     return model
+
+
+import torch.nn as nn
+
+
+def freeze_batchnorm_layers(model):
+    """
+    Congela totes les capes BatchNorm del model.
+
+    Això evita que durant el fine-tuning s'actualitzin les estadístiques
+    running_mean i running_var de BatchNorm.
+
+    És útil en transfer learning perquè les estadístiques apreses a ImageNet
+    poden ser més estables que recalcular-les amb el nostre dataset.
+    """
+
+    for module in model.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            module.eval()
+
+            for param in module.parameters():
+                param.requires_grad = False

@@ -19,9 +19,10 @@ from utils.data_utils import (
     compute_class_weights,
 )
 
-from models.transfer_model import create_resnet_model
+from models.transfer_model import create_resnet_model, freeze_batchnorm_layers
 from train import train_model
 from test import test_model
+from utils.losses import compute_class_priors, LogitAdjustedCrossEntropyLoss
 
 
 def set_seed(seed):
@@ -50,7 +51,7 @@ def load_checkpoint(model, checkpoint_path, device):
 
 def main():
     config = {
-        "experiment_name": "exp19_resnet50_336_aspect_crop_cache",
+        "experiment_name": "exp23_resnet50_384_logit_adjustment",
 
         "dataset_root": "/home/datasets/wikiart/",
         "model_name": "resnet50",
@@ -59,12 +60,16 @@ def main():
         "unfreeze_layer3": False,
 
         "epochs": 20,
-        "batch_size": 64,
-        "learning_rate": 2e-5,
-        "weight_decay": 1e-4,
-        "early_stopping_patience": 4,
+        "batch_size": 32,
 
-        "image_size": 336,
+        "learning_rate": 1e-5,
+        "learning_rate_fc": 5e-4,
+        "learning_rate_backbone": 1e-5,
+
+        "weight_decay": 5e-4,
+        "early_stopping_patience": 3,
+
+        "image_size": 384,
         "val_size": 0.15,
         "test_size": 0.15,
         "random_seed": 42,
@@ -73,18 +78,14 @@ def main():
         "remove_duplicates": False,
         "check_corrupted": False,
 
-        # EXP19:
-        # Cache intermedi: costat curt = 336, aspect ratio preservat.
         "use_resized_cache": True,
-        "resized_cache_root": "/tmp/wikiart_336_short_side",
-        "force_rebuild_cache": True,   # només primer cop
+        "resized_cache_root": "/tmp/wikiart_384",
+        "force_rebuild_cache": False,
         "cache_num_workers": 12,
-        "cache_resize_mode": "short_side",
+        "cache_resize_mode": "square",
 
-        # EXP19:
-        # Com que el cache té costat llarg variable,
-        # el DataLoader ha de fer crop 336x336.
-        "use_aspect_crop_cache": True,
+        "use_aspect_crop_cache": False,
+        "exclude_paths_file": None,
 
         "use_top_k_classes": True,
         "top_k_classes": 14,
@@ -98,6 +99,13 @@ def main():
         "use_augmentation": True,
         "use_label_smoothing": True,
         "label_smoothing": 0.05,
+
+        # EXP23
+        "use_logit_adjustment": True,
+        "logit_adjustment_tau": 1.0,
+
+        "freeze_batchnorm": False,
+        "use_differential_lr": False,
 
         "use_scheduler": True,
         "scheduler_factor": 0.5,
@@ -141,6 +149,7 @@ def main():
         root_dir=dataset_root,
         remove_duplicates=config["remove_duplicates"],
         check_corrupted=config["check_corrupted"],
+        exclude_paths_file=config.get("exclude_paths_file"),
     )
 
     print_dataset_summary(
@@ -234,8 +243,13 @@ def main():
         partial_finetuning=config["partial_finetuning"],
         unfreeze_layer3=config["unfreeze_layer3"],
     )
-
+    
     model = model.to(device)
+
+    if config.get("freeze_batchnorm", False):
+        freeze_batchnorm_layers(model)
+        print("BatchNorm congelada.")
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -253,9 +267,36 @@ def main():
     # criterion_train és la loss que fem servir per aprendre.
     # criterion_eval és la loss "normal" per validation i test.
 
-    criterion_eval = nn.CrossEntropyLoss()
+    label_smoothing = config["label_smoothing"] if config["use_label_smoothing"] else 0.0
 
-    if config["use_class_weights"]:
+    if config.get("use_logit_adjustment", False):
+        class_priors = compute_class_priors(
+            labels=train_labels,
+            num_classes=num_classes,
+            device=device,
+        )
+
+        criterion_train = LogitAdjustedCrossEntropyLoss(
+            class_priors=class_priors,
+            tau=config["logit_adjustment_tau"],
+            label_smoothing=label_smoothing,
+        )
+
+        print("\n========== LOGIT ADJUSTMENT ==========")
+        print(f"tau: {config['logit_adjustment_tau']}")
+        for class_idx in range(num_classes):
+            print(
+                f"{idx_to_class[class_idx]}: "
+                f"prior={class_priors[class_idx].item():.6f}"
+            )
+        print("======================================\n")
+
+        wandb.config.update({
+            "class_priors": class_priors.detach().cpu().tolist(),
+            "logit_adjustment_tau": config["logit_adjustment_tau"],
+        })
+
+    elif config["use_class_weights"]:
         class_weights = compute_class_weights(
             labels=train_labels,
             num_classes=num_classes,
@@ -264,7 +305,7 @@ def main():
 
         criterion_train = nn.CrossEntropyLoss(
             weight=class_weights,
-            label_smoothing=config["label_smoothing"] if config["use_label_smoothing"] else 0.0,
+            label_smoothing=label_smoothing,
         )
 
         wandb.config.update({
@@ -273,18 +314,40 @@ def main():
 
     else:
         criterion_train = nn.CrossEntropyLoss(
-            label_smoothing=config["label_smoothing"] if config["use_label_smoothing"] else 0.0,
+            label_smoothing=label_smoothing,
         )
+    criterion_eval = nn.CrossEntropyLoss()
 
     # Només entrenem paràmetres amb requires_grad=True.
     # En feature extraction això serà principalment la capa fc final.
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
 
-    optimizer = optim.AdamW(
-        trainable_params,
-        lr=config["learning_rate"],
-        weight_decay=config["weight_decay"],
-    )
+    if config.get("use_differential_lr", False):
+        optimizer = optim.AdamW(
+            [
+                {
+                    "params": model.layer4.parameters(),
+                    "lr": config["learning_rate_backbone"],
+                },
+                {
+                    "params": model.fc.parameters(),
+                    "lr": config["learning_rate_fc"],
+                },
+            ],
+            weight_decay=config["weight_decay"],
+        )
+
+        print("\nOptimizer amb learning rates diferencials:")
+        print(f"  layer4 lr: {config['learning_rate_backbone']}")
+        print(f"  fc lr:     {config['learning_rate_fc']}")
+        print(f"  weight decay: {config['weight_decay']}\n")
+
+    else:
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=config["learning_rate"],
+            weight_decay=config["weight_decay"],
+        )
     #Experiment 14: scheduler de reducció de lr quan la val acc no millora. Molt útil per partial finetuning.
     scheduler = None
 
@@ -312,6 +375,7 @@ def main():
         class_to_idx=class_to_idx,
         idx_to_class=idx_to_class,
         early_stopping_patience=config["early_stopping_patience"],
+        freeze_batchnorm=config.get("freeze_batchnorm", False),
     )
 
     # 7. Carregar millor checkpoint abans del test

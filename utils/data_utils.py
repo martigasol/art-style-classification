@@ -244,7 +244,7 @@ def prepare_resized_cache_dataset(
     return cache_root
 
 
-def load_wikiart_dataset(root_dir, remove_duplicates=True, check_corrupted=True):
+def load_wikiart_dataset(root_dir, remove_duplicates=True, check_corrupted=True,exclude_paths_file=None):
     """
     Carrega un dataset organitzat en carpetes per classe.
 
@@ -273,10 +273,18 @@ def load_wikiart_dataset(root_dir, remove_duplicates=True, check_corrupted=True)
         "skipped_non_images": 0,
         "skipped_corrupted": 0,
         "skipped_duplicates": 0,
+        "skipped_excluded": 0,
     }
 
     seen_hashes = set()
+    excluded_paths = set()
 
+    if exclude_paths_file is not None and os.path.exists(exclude_paths_file):
+        with open(exclude_paths_file, "r", encoding="utf-8") as f:
+            excluded_paths = set(line.strip() for line in f if line.strip())
+
+        print(f"Excloent {len(excluded_paths)} imatges segons: {exclude_paths_file}")
+    
     class_names = sorted([
         class_name
         for class_name in os.listdir(root_dir)
@@ -295,6 +303,10 @@ def load_wikiart_dataset(root_dir, remove_duplicates=True, check_corrupted=True)
                 continue
 
             image_path = os.path.join(class_dir, filename)
+
+            if image_path in excluded_paths:
+                stats["skipped_excluded"] += 1
+                continue
 
             if check_corrupted and not check_image_is_valid(image_path):
                 stats["skipped_corrupted"] += 1
@@ -349,6 +361,7 @@ def print_dataset_summary(image_paths, labels, class_to_idx, idx_to_class, stats
     print(f"Number of classes:       {len(class_to_idx)}")
     print(f"Number of image paths:   {len(image_paths)}")
     print(f"Number of labels:        {len(labels)}")
+    print(f"Skipped excluded:       {stats.get('skipped_excluded', 0)}")
 
     print("\nTop 10 largest classes:")
     for class_name, count in distribution[:10]:

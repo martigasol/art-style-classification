@@ -5,6 +5,8 @@ import wandb
 from tqdm import tqdm
 from sklearn.metrics import f1_score
 
+from models.transfer_model import freeze_batchnorm_layers
+
 
 def compute_accuracy(outputs, labels):
     """
@@ -17,13 +19,15 @@ def compute_accuracy(outputs, labels):
     return correct, total
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device):
+def train_one_epoch(model, train_loader, criterion, optimizer, device,freeze_batchnorm=False):
     """
     Entrena el model durant una epoch.
     Aquí sí que el model aprèn i s'actualitzen els pesos.
     """
 
     model.train()
+    if freeze_batchnorm:
+        freeze_batchnorm_layers(model)
 
     running_loss = torch.zeros((), device=device, dtype=torch.float64)
     running_correct = torch.zeros((), device=device, dtype=torch.int64)
@@ -147,6 +151,7 @@ def train_model(
     class_to_idx,
     idx_to_class,
     early_stopping_patience=None,
+    freeze_batchnorm=False,
 ):
     """
     Bucle complet d'entrenament.
@@ -168,6 +173,8 @@ def train_model(
             criterion=criterion_train,
             optimizer=optimizer,
             device=device,
+            freeze_batchnorm=freeze_batchnorm
+
         )
 
         val_loss, val_acc, val_macro_f1 = validate_one_epoch(
