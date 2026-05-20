@@ -15,6 +15,7 @@ from utils.data_utils import (
     print_split_summary,
     create_dataloaders,
     filter_top_k_classes,
+    group_similar_classes,
     cap_images_per_class,
     compute_class_weights,
 )
@@ -51,7 +52,7 @@ def load_checkpoint(model, checkpoint_path, device):
 
 def main():
     config = {
-        "experiment_name": "exp23_resnet50_384_logit_adjustment",
+        "experiment_name": "exp27_resnet50_384_all_classes",
 
         "dataset_root": "/home/datasets/wikiart/",
         "model_name": "resnet50",
@@ -63,9 +64,6 @@ def main():
         "batch_size": 32,
 
         "learning_rate": 1e-5,
-        "learning_rate_fc": 5e-4,
-        "learning_rate_backbone": 1e-5,
-
         "weight_decay": 5e-4,
         "early_stopping_patience": 3,
 
@@ -87,25 +85,54 @@ def main():
         "use_aspect_crop_cache": False,
         "exclude_paths_file": None,
 
-        "use_top_k_classes": True,
+        # EXP26: no top-k, fem servir totes les classes
+        "use_top_k_classes": False,
         "top_k_classes": 14,
+
+        # EXP26: agrupació de classes semblants sobre totes les classes
+        "use_class_grouping": False,
+        "class_groups": {
+            "Impressionism_Post_Impressionism_Pointillism": [
+                "Impressionism",
+                "Post_Impressionism",
+                "Pointillism",
+            ],
+            "Baroque_Rococo": [
+                "Baroque",
+                "Rococo",
+            ],
+            "AbstractExpressionism_ColorField_ActionPainting": [
+                "Abstract_Expressionism",
+                "Color_Field_Painting",
+                "Action_painting",
+            ],
+            "Cubism_AnalyticalCubism": [
+                "Cubism",
+                "Analytical_Cubism",
+            ],
+            "Renaissance": [
+                "Early_Renaissance",
+                "High_Renaissance",
+                "Northern_Renaissance",
+                "Mannerism_Late_Renaissance",
+            ],
+        },
 
         "use_class_cap": False,
         "max_images_per_class": None,
 
-        "use_class_weights": False,
+        "use_class_weights": True,
         "use_weighted_sampler": False,
+
+        "use_logit_adjustment": False,
+        "logit_adjustment_tau": 1.0,
 
         "use_augmentation": True,
         "use_label_smoothing": True,
         "label_smoothing": 0.05,
 
-        # EXP23
-        "use_logit_adjustment": True,
-        "logit_adjustment_tau": 1.0,
-
-        "freeze_batchnorm": False,
         "use_differential_lr": False,
+        "freeze_batchnorm": False,
 
         "use_scheduler": True,
         "scheduler_factor": 0.5,
@@ -159,6 +186,8 @@ def main():
         idx_to_class=idx_to_class,
         stats=stats,
     )
+    print(f"use_top_k_classes = {config['use_top_k_classes']}")
+
     # 1.1. Experiment 2: conservar només les top-k classes més grans
     if config["use_top_k_classes"]:
         image_paths, labels, class_to_idx, idx_to_class = filter_top_k_classes(
@@ -176,6 +205,24 @@ def main():
             idx_to_class=idx_to_class,
             stats=stats,
         )
+
+    if config.get("use_class_grouping", False):
+        image_paths, labels, class_to_idx, idx_to_class = group_similar_classes(
+            image_paths=image_paths,
+            labels=labels,
+            idx_to_class=idx_to_class,
+            class_groups=config["class_groups"],
+        )
+
+        print("\nResum després d'agrupar classes semblants:")
+        print_dataset_summary(
+            image_paths=image_paths,
+            labels=labels,
+            class_to_idx=class_to_idx,
+            idx_to_class=idx_to_class,
+            stats=stats,
+        )
+
     # 1.2. Experiment 11: limitar les classes majoritàries
     if config["use_class_cap"]:
         image_paths, labels = cap_images_per_class(

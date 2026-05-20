@@ -617,6 +617,76 @@ def filter_top_k_classes(image_paths, labels, idx_to_class, top_k=14):
     return filtered_paths, filtered_labels, new_class_to_idx, new_idx_to_class
 
 
+def group_similar_classes(image_paths, labels, idx_to_class, class_groups):
+    """
+    Agrupa classes visualment semblants en una nova label.
+
+    Args:
+        image_paths: llista de paths d'imatges.
+        labels: labels actuals.
+        idx_to_class: mapping label -> nom de classe actual.
+        class_groups: diccionari:
+            {
+                "Nom_Nova_Classe": ["Classe_A", "Classe_B"]
+            }
+
+    Returns:
+        grouped_paths
+        grouped_labels
+        new_class_to_idx
+        new_idx_to_class
+    """
+    class_to_group = {}
+    available_class_names = set(idx_to_class.values())
+
+    for group_name, class_names in class_groups.items():
+        for class_name in class_names:
+            class_to_group[class_name] = group_name
+
+    old_idx_to_grouped_class = {}
+    final_class_names = []
+
+    for old_label in sorted(idx_to_class.keys()):
+        old_class_name = idx_to_class[old_label]
+        grouped_class_name = class_to_group.get(old_class_name, old_class_name)
+        old_idx_to_grouped_class[old_label] = grouped_class_name
+
+        if grouped_class_name not in final_class_names:
+            final_class_names.append(grouped_class_name)
+
+    new_class_to_idx = {
+        class_name: new_idx
+        for new_idx, class_name in enumerate(final_class_names)
+    }
+
+    new_idx_to_class = {
+        new_idx: class_name
+        for class_name, new_idx in new_class_to_idx.items()
+    }
+
+    grouped_labels = [
+        new_class_to_idx[old_idx_to_grouped_class[label]]
+        for label in labels
+    ]
+
+    print("\n========== CLASS GROUPING ==========")
+    print("Agrupant classes semblants:")
+    for group_name, class_names in class_groups.items():
+        present_class_names = [
+            class_name
+            for class_name in class_names
+            if class_name in available_class_names
+        ]
+        print(f"  {group_name}: {', '.join(present_class_names)}")
+
+    print(f"\nClasses finals: {len(new_class_to_idx)}")
+    for class_idx in range(len(new_idx_to_class)):
+        print(f"  {class_idx}: {new_idx_to_class[class_idx]}")
+    print("====================================\n")
+
+    return image_paths, grouped_labels, new_class_to_idx, new_idx_to_class
+
+
 #Experiment11
 
 def cap_images_per_class(image_paths, labels, idx_to_class, max_images_per_class=6000, random_seed=42):
@@ -737,4 +807,3 @@ def create_weighted_sampler(labels):
     )
 
     return sampler
-
