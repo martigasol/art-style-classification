@@ -2,32 +2,13 @@ import os
 
 import torch
 import wandb
-from tqdm import tqdm
 from sklearn.metrics import f1_score
-
-from models.transfer_model import freeze_batchnorm_layers
-
-
-def compute_accuracy(outputs, labels):
-    """
-    Calcula accuracy d'un batch.
-    """
-    _, preds = torch.max(outputs, dim=1)
-    correct = (preds == labels).sum().item()
-    total = labels.size(0)
-
-    return correct, total
+from tqdm import tqdm
 
 
-def train_one_epoch(model, train_loader, criterion, optimizer, device,freeze_batchnorm=False):
-    """
-    Entrena el model durant una epoch.
-    Aquí sí que el model aprèn i s'actualitzen els pesos.
-    """
-
+def train_one_epoch(model, train_loader, criterion, optimizer, device):
+    """Forward, loss, backward i actualització de pesos."""
     model.train()
-    if freeze_batchnorm:
-        freeze_batchnorm_layers(model)
 
     running_loss = torch.zeros((), device=device, dtype=torch.float64)
     running_correct = torch.zeros((), device=device, dtype=torch.int64)
@@ -38,16 +19,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,freeze_bat
         labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-
         outputs = model(images)
         loss = criterion(outputs, labels)
-
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.detach().double() * images.size(0)
-
         preds = outputs.detach().argmax(dim=1)
+        running_loss += loss.detach().double() * images.size(0)
         running_correct += (preds == labels).sum()
         running_total += labels.size(0)
 
@@ -58,15 +36,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,freeze_bat
 
 
 def validate_one_epoch(model, val_loader, criterion, device):
-    """
-    Avalua el model amb validation.
-    Aquí NO aprèn: només mesurem com va.
-
-    A més de loss i accuracy, calculem macro F1.
-    Macro F1 és especialment important amb datasets desbalancejats,
-    perquè dona el mateix pes a totes les classes.
-    """
-
+    """Avalua validation sense actualitzar pesos."""
     model.eval()
 
     running_loss = torch.zeros((), device=device, dtype=torch.float64)
@@ -83,14 +53,11 @@ def validate_one_epoch(model, val_loader, criterion, device):
 
             outputs = model(images)
             loss = criterion(outputs, labels)
-
-            running_loss += loss.double() * images.size(0)
-
             preds = outputs.argmax(dim=1)
 
+            running_loss += loss.double() * images.size(0)
             running_correct += (preds == labels).sum()
             running_total += labels.size(0)
-
             all_preds.append(preds)
             all_labels.append(labels)
 
@@ -98,7 +65,7 @@ def validate_one_epoch(model, val_loader, criterion, device):
     epoch_acc = (running_correct.double() / running_total).item()
     all_preds = torch.cat(all_preds).cpu().tolist()
     all_labels = torch.cat(all_labels).cpu().tolist()
-    epoch_macro_f1 = f1_score(all_labels, all_preds, average="macro")
+    epoch_macro_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
 
     return epoch_loss, epoch_acc, epoch_macro_f1
 
@@ -115,26 +82,23 @@ def save_checkpoint(
     class_to_idx,
     idx_to_class,
 ):
-    """
-    Guarda el millor model fins ara.
-    Guardem també config i classes per poder interpretar resultats després.
-    """
-
+    """Guarda pesos, config i mapping de classes."""
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
-    checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "val_loss": val_loss,
-        "val_accuracy": val_accuracy,
-        "val_macro_f1": val_macro_f1,
-        "config": config,
-        "class_to_idx": class_to_idx,
-        "idx_to_class": idx_to_class,
-    }
-
-    torch.save(checkpoint, checkpoint_path)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "val_loss": val_loss,
+            "val_accuracy": val_accuracy,
+            "val_macro_f1": val_macro_f1,
+            "config": config,
+            "class_to_idx": class_to_idx,
+            "idx_to_class": idx_to_class,
+        },
+        checkpoint_path,
+    )
 
 
 def train_model(
@@ -151,17 +115,10 @@ def train_model(
     class_to_idx,
     idx_to_class,
     early_stopping_patience=None,
-    freeze_batchnorm=False,
 ):
-    """
-    Bucle complet d'entrenament.
-
-    Guarda checkpoint segons millor validation macro F1.
-    """
-
+    """Bucle complet amb checkpoint pel millor validation macro F1."""
     best_val_macro_f1 = 0.0
     epochs_without_improvement = 0
-
     epochs = config["epochs"]
 
     for epoch in range(epochs):
@@ -173,10 +130,7 @@ def train_model(
             criterion=criterion_train,
             optimizer=optimizer,
             device=device,
-            freeze_batchnorm=freeze_batchnorm
-
         )
-
         val_loss, val_acc, val_macro_f1 = validate_one_epoch(
             model=model,
             val_loader=val_loader,
@@ -187,7 +141,8 @@ def train_model(
         current_lr = optimizer.param_groups[0]["lr"]
         print(
             f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val Macro F1: {val_macro_f1:.4f}| LR: {current_lr:.2e}"
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
+            f"Val Macro F1: {val_macro_f1:.4f} | LR: {current_lr:.2e}"
         )
 
         wandb.log({
@@ -199,13 +154,13 @@ def train_model(
             "val_macro_f1": val_macro_f1,
             "learning_rate": current_lr,
         })
+
         if scheduler is not None:
             scheduler.step(val_macro_f1)
 
         if val_macro_f1 > best_val_macro_f1:
             best_val_macro_f1 = val_macro_f1
             epochs_without_improvement = 0
-
             save_checkpoint(
                 checkpoint_path=checkpoint_path,
                 model=model,
@@ -218,9 +173,7 @@ def train_model(
                 class_to_idx=class_to_idx,
                 idx_to_class=idx_to_class,
             )
-
             print(f"Nou millor model guardat a: {checkpoint_path}")
-        
         else:
             epochs_without_improvement += 1
             print(
@@ -233,11 +186,10 @@ def train_model(
                 and epochs_without_improvement >= early_stopping_patience
             ):
                 print(
-                    f"Early stopping activat. "
+                    "Early stopping activat. "
                     f"Sense millora durant {early_stopping_patience} epochs."
                 )
                 break
 
     print(f"\nMillor validation macro F1: {best_val_macro_f1:.4f}")
-
     return best_val_macro_f1

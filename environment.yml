@@ -1,28 +1,22 @@
-name: xnap-example
+name: wikiart-classification
 channels:
-- pytorch
-- nvidia
-- conda-forge
+  - pytorch
+  - nvidia
+  - conda-forge
 dependencies:
-- python=3.10
-- pip
-- libstdcxx-ng>=12
-- mkl<2024.1
-- intel-openmp<2024.1
-- pytorch::pytorch=2.4.1=py3.10_cuda12.4_cudnn9.1.0_0
-- pytorch::torchvision=0.19.1=py310_cu124
-- pytorch::torchaudio=2.4.1=py310_cu124
-- pytorch::pytorch-mutex=1.0=cuda
-- pytorch-cuda=12.4
-- numpy<2
-- pandas
-- matplotlib
-- scikit-learn
-- pillow
-- tqdm
-- tensorboard
-- protobuf
-- onnx
-- onnxruntime
-- ipykernel
-- wandb
+  - python=3.10
+  - pip
+  - libstdcxx-ng>=12
+  - mkl<2024.1
+  - intel-openmp<2024.1
+  - pytorch::pytorch=2.4.1
+  - pytorch::torchvision=0.19.1
+  - pytorch-cuda=12.4
+  - numpy<2
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - pillow
+  - tqdm
+  - wandb
+  - imagehash

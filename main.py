@@ -7,29 +7,24 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
+from models.transfer_model import create_resnet_model
+from test import test_model
+from train import train_model
 from utils.data_utils import (
-    prepare_resized_cache_dataset,
-    load_wikiart_dataset,
-    print_dataset_summary,
-    split_dataset,
-    print_split_summary,
+    compute_class_weights,
     create_dataloaders,
     filter_top_k_classes,
     group_similar_classes,
-    cap_images_per_class,
-    compute_class_weights,
+    load_wikiart_dataset,
+    prepare_resized_cache_dataset,
+    print_dataset_summary,
+    print_split_summary,
+    split_dataset,
 )
-
-from models.transfer_model import create_resnet_model, freeze_batchnorm_layers
-from train import train_model
-from test import test_model
-from utils.losses import compute_class_priors, LogitAdjustedCrossEntropyLoss
 
 
 def set_seed(seed):
-    """
-    Fixem llavors per fer l'experiment més reproduïble.
-    """
+    """Fixem llavors per fer l'experiment més reproduïble."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -37,110 +32,84 @@ def set_seed(seed):
 
 
 def load_checkpoint(model, checkpoint_path, device):
-    """
-    Carrega els pesos del millor model guardat.
-    """
+    """Carrega el millor checkpoint guardat durant l'entrenament."""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     print(f"Checkpoint carregat: {checkpoint_path}")
     print(f"Epoch checkpoint: {checkpoint['epoch'] + 1}")
-    print(f"Validation accuracy checkpoint: {checkpoint['val_accuracy']:.4f}")
+    print(f"Validation macro F1 checkpoint: {checkpoint['val_macro_f1']:.4f}")
 
     return model
 
 
-def main():
-    config = {
+def build_config():
+    return {
         "experiment_name": "exp27_resnet50_384_all_classes",
-
         "dataset_root": "/home/datasets/wikiart/",
         "model_name": "resnet50",
-        "feature_extraction": False,
-        "partial_finetuning": True,
-        "unfreeze_layer3": False,
-
-        "epochs": 20,
+        "image_size": 384,
         "batch_size": 32,
-
+        "epochs": 20,
         "learning_rate": 1e-5,
         "weight_decay": 5e-4,
         "early_stopping_patience": 3,
-
-        "image_size": 384,
+        "seed": 42,
         "val_size": 0.15,
         "test_size": 0.15,
-        "random_seed": 42,
         "num_workers": 8,
-
-        "remove_duplicates": False,
-        "check_corrupted": False,
-
-        "use_resized_cache": True,
-        "resized_cache_root": "/tmp/wikiart_384",
-        "force_rebuild_cache": False,
-        "cache_num_workers": 12,
-        "cache_resize_mode": "square",
-
-        "use_aspect_crop_cache": False,
-        "exclude_paths_file": None,
-
-        # EXP26: no top-k, fem servir totes les classes
+        "feature_extraction": False,
+        "partial_finetuning": True,
+        "unfreeze_layer3": False,
         "use_top_k_classes": False,
         "top_k_classes": 14,
-
-        # EXP26: agrupació de classes semblants sobre totes les classes
         "use_class_grouping": False,
-        "class_groups": {
-            "Impressionism_Post_Impressionism_Pointillism": [
-                "Impressionism",
-                "Post_Impressionism",
-                "Pointillism",
-            ],
-            "Baroque_Rococo": [
-                "Baroque",
-                "Rococo",
-            ],
-            "AbstractExpressionism_ColorField_ActionPainting": [
-                "Abstract_Expressionism",
-                "Color_Field_Painting",
-                "Action_painting",
-            ],
-            "Cubism_AnalyticalCubism": [
-                "Cubism",
-                "Analytical_Cubism",
-            ],
-            "Renaissance": [
-                "Early_Renaissance",
-                "High_Renaissance",
-                "Northern_Renaissance",
-                "Mannerism_Late_Renaissance",
-            ],
-        },
-
-        "use_class_cap": False,
-        "max_images_per_class": None,
-
+        "class_groups": {},
         "use_class_weights": True,
         "use_weighted_sampler": False,
-
-        "use_logit_adjustment": False,
-        "logit_adjustment_tau": 1.0,
-
-        "use_augmentation": True,
         "use_label_smoothing": True,
         "label_smoothing": 0.05,
-
-        "use_differential_lr": False,
-        "freeze_batchnorm": False,
-
         "use_scheduler": True,
         "scheduler_factor": 0.5,
         "scheduler_patience": 1,
         "scheduler_min_lr": 1e-6,
+        "use_augmentation": True,
+        "use_resized_cache": True,
+        "resized_cache_root": "/tmp/wikiart_384",
+        "force_rebuild_cache": False,
+        # Per reproduir experiments d'aspect ratio: "square", "short_side" o "padding".
+        "cache_resize_mode": "square",
+        "use_aspect_crop_cache": False,
     }
 
-    set_seed(config["random_seed"])
+
+def build_loss(config, train_labels, num_classes, idx_to_class, device):
+    label_smoothing = (
+        config["label_smoothing"] if config["use_label_smoothing"] else 0.0
+    )
+
+    if config["use_class_weights"]:
+        class_weights = compute_class_weights(
+            labels=train_labels,
+            num_classes=num_classes,
+            idx_to_class=idx_to_class,
+        ).to(device)
+
+        criterion_train = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=label_smoothing,
+        )
+        wandb.config.update({"class_weights": class_weights.cpu().tolist()})
+    else:
+        criterion_train = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    criterion_eval = nn.CrossEntropyLoss()
+    return criterion_train, criterion_eval
+
+
+def main():
+    config = build_config()
+    set_seed(config["seed"])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device utilitzat: {device}")
@@ -166,17 +135,15 @@ def main():
             cache_root=config["resized_cache_root"],
             image_size=config["image_size"],
             force_rebuild=config["force_rebuild_cache"],
-            num_workers=config["cache_num_workers"],
-            cache_resize_mode=config.get("cache_resize_mode", "square")
+            num_workers=config["num_workers"],
+            cache_resize_mode=config["cache_resize_mode"],
         )
         resize_images_in_dataloader = False
 
-    # 1. Carregar dataset complet
     image_paths, labels, class_to_idx, idx_to_class, stats = load_wikiart_dataset(
         root_dir=dataset_root,
-        remove_duplicates=config["remove_duplicates"],
-        check_corrupted=config["check_corrupted"],
-        exclude_paths_file=config.get("exclude_paths_file"),
+        remove_duplicates=False,
+        check_corrupted=False,
     )
 
     print_dataset_summary(
@@ -186,9 +153,7 @@ def main():
         idx_to_class=idx_to_class,
         stats=stats,
     )
-    print(f"use_top_k_classes = {config['use_top_k_classes']}")
 
-    # 1.1. Experiment 2: conservar només les top-k classes més grans
     if config["use_top_k_classes"]:
         image_paths, labels, class_to_idx, idx_to_class = filter_top_k_classes(
             image_paths=image_paths,
@@ -197,16 +162,7 @@ def main():
             top_k=config["top_k_classes"],
         )
 
-        print("\nResum després de filtrar top-k classes:")
-        print_dataset_summary(
-            image_paths=image_paths,
-            labels=labels,
-            class_to_idx=class_to_idx,
-            idx_to_class=idx_to_class,
-            stats=stats,
-        )
-
-    if config.get("use_class_grouping", False):
+    if config["use_class_grouping"]:
         image_paths, labels, class_to_idx, idx_to_class = group_similar_classes(
             image_paths=image_paths,
             labels=labels,
@@ -214,58 +170,23 @@ def main():
             class_groups=config["class_groups"],
         )
 
-        print("\nResum després d'agrupar classes semblants:")
-        print_dataset_summary(
-            image_paths=image_paths,
-            labels=labels,
-            class_to_idx=class_to_idx,
-            idx_to_class=idx_to_class,
-            stats=stats,
-        )
-
-    # 1.2. Experiment 11: limitar les classes majoritàries
-    if config["use_class_cap"]:
-        image_paths, labels = cap_images_per_class(
-            image_paths=image_paths,
-            labels=labels,
-            idx_to_class=idx_to_class,
-            max_images_per_class=config["max_images_per_class"],
-            random_seed=config["random_seed"],
-        )
-
-        print("\nResum després de capar classes majoritàries:")
-        print_dataset_summary(
-            image_paths=image_paths,
-            labels=labels,
-            class_to_idx=class_to_idx,
-            idx_to_class=idx_to_class,
-            stats=stats,
-        )
-
-
     num_classes = len(class_to_idx)
     print(f"Nombre de classes utilitzades: {num_classes}")
 
     wandb.config.update({
         "num_classes": num_classes,
         "num_images": len(image_paths),
-        "class_cap_applied": config["use_class_cap"],
-        "max_images_per_class": config["max_images_per_class"] if config["use_class_cap"] else None,
     })
 
-    
-    # 2. Split train / validation / test
     train_paths, val_paths, test_paths, train_labels, val_labels, test_labels = split_dataset(
         image_paths=image_paths,
         labels=labels,
         val_size=config["val_size"],
         test_size=config["test_size"],
-        random_state=config["random_seed"],
+        random_state=config["seed"],
     )
-
     print_split_summary(train_labels, val_labels, test_labels)
 
-    # 3. Crear DataLoaders
     train_loader, val_loader, test_loader = create_dataloaders(
         train_paths=train_paths,
         val_paths=val_paths,
@@ -279,27 +200,21 @@ def main():
         resize_images=resize_images_in_dataloader,
         use_augmentation=config["use_augmentation"],
         use_weighted_sampler=config["use_weighted_sampler"],
-        use_aspect_crop_cache=config.get("use_aspect_crop_cache", False),
+        use_aspect_crop_cache=config["use_aspect_crop_cache"],
     )
 
-    # 4. Crear model ResNet
     model = create_resnet_model(
         num_classes=num_classes,
         model_name=config["model_name"],
         feature_extraction=config["feature_extraction"],
         partial_finetuning=config["partial_finetuning"],
         unfreeze_layer3=config["unfreeze_layer3"],
-    )
-    
-    model = model.to(device)
-
-    if config.get("freeze_batchnorm", False):
-        freeze_batchnorm_layers(model)
-        print("BatchNorm congelada.")
+    ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
+    trainable_params_count = sum(
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
     print(f"Total parameters: {total_params}")
     print(f"Trainable parameters: {trainable_params_count}")
     print(f"Trainable ratio: {trainable_params_count / total_params:.4f}")
@@ -310,94 +225,21 @@ def main():
         "trainable_ratio": trainable_params_count / total_params,
     })
 
-    # 5. Loss
-    # criterion_train és la loss que fem servir per aprendre.
-    # criterion_eval és la loss "normal" per validation i test.
+    criterion_train, criterion_eval = build_loss(
+        config=config,
+        train_labels=train_labels,
+        num_classes=num_classes,
+        idx_to_class=idx_to_class,
+        device=device,
+    )
 
-    label_smoothing = config["label_smoothing"] if config["use_label_smoothing"] else 0.0
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+    )
 
-    if config.get("use_logit_adjustment", False):
-        class_priors = compute_class_priors(
-            labels=train_labels,
-            num_classes=num_classes,
-            device=device,
-        )
-
-        criterion_train = LogitAdjustedCrossEntropyLoss(
-            class_priors=class_priors,
-            tau=config["logit_adjustment_tau"],
-            label_smoothing=label_smoothing,
-        )
-
-        print("\n========== LOGIT ADJUSTMENT ==========")
-        print(f"tau: {config['logit_adjustment_tau']}")
-        for class_idx in range(num_classes):
-            print(
-                f"{idx_to_class[class_idx]}: "
-                f"prior={class_priors[class_idx].item():.6f}"
-            )
-        print("======================================\n")
-
-        wandb.config.update({
-            "class_priors": class_priors.detach().cpu().tolist(),
-            "logit_adjustment_tau": config["logit_adjustment_tau"],
-        })
-
-    elif config["use_class_weights"]:
-        class_weights = compute_class_weights(
-            labels=train_labels,
-            num_classes=num_classes,
-            idx_to_class=idx_to_class,
-        ).to(device)
-
-        criterion_train = nn.CrossEntropyLoss(
-            weight=class_weights,
-            label_smoothing=label_smoothing,
-        )
-
-        wandb.config.update({
-            "class_weights": class_weights.detach().cpu().tolist(),
-        })
-
-    else:
-        criterion_train = nn.CrossEntropyLoss(
-            label_smoothing=label_smoothing,
-        )
-    criterion_eval = nn.CrossEntropyLoss()
-
-    # Només entrenem paràmetres amb requires_grad=True.
-    # En feature extraction això serà principalment la capa fc final.
-    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-
-    if config.get("use_differential_lr", False):
-        optimizer = optim.AdamW(
-            [
-                {
-                    "params": model.layer4.parameters(),
-                    "lr": config["learning_rate_backbone"],
-                },
-                {
-                    "params": model.fc.parameters(),
-                    "lr": config["learning_rate_fc"],
-                },
-            ],
-            weight_decay=config["weight_decay"],
-        )
-
-        print("\nOptimizer amb learning rates diferencials:")
-        print(f"  layer4 lr: {config['learning_rate_backbone']}")
-        print(f"  fc lr:     {config['learning_rate_fc']}")
-        print(f"  weight decay: {config['weight_decay']}\n")
-
-    else:
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=config["learning_rate"],
-            weight_decay=config["weight_decay"],
-        )
-    #Experiment 14: scheduler de reducció de lr quan la val acc no millora. Molt útil per partial finetuning.
     scheduler = None
-
     if config["use_scheduler"]:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -407,7 +249,6 @@ def main():
             min_lr=config["scheduler_min_lr"],
         )
 
-    # 6. Entrenament amb checkpoint
     train_model(
         model=model,
         train_loader=train_loader,
@@ -422,17 +263,14 @@ def main():
         class_to_idx=class_to_idx,
         idx_to_class=idx_to_class,
         early_stopping_patience=config["early_stopping_patience"],
-        freeze_batchnorm=config.get("freeze_batchnorm", False),
     )
 
-    # 7. Carregar millor checkpoint abans del test
     model = load_checkpoint(
         model=model,
         checkpoint_path=checkpoint_path,
         device=device,
     )
 
-    # 8. Test final
     test_model(
         model=model,
         test_loader=test_loader,
@@ -443,6 +281,7 @@ def main():
     )
 
     wandb.finish()
-    
+
+
 if __name__ == "__main__":
     main()
