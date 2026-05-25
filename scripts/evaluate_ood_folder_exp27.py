@@ -7,8 +7,10 @@ from pathlib import Path
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import wandb
 from PIL import Image
 from sklearn.metrics import (
+    ConfusionMatrixDisplay,
     accuracy_score,
     classification_report,
     confusion_matrix,
@@ -77,7 +79,10 @@ class OODFolderDataset(Dataset):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate an EXP27 27-class checkpoint on an external OOD folder dataset."
+        description=(
+            "Evaluate an EXP27 27-class checkpoint on an external OOD folder "
+            "dataset."
+        )
     )
     parser.add_argument("--ood_root", type=str, default="data/ood_art_external")
     parser.add_argument("--checkpoint_path", type=str, required=True)
@@ -86,6 +91,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default="results/ood_exp27")
+    parser.add_argument("--wandb_project", type=str, default="wikiart-classification")
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--disable_wandb", action="store_true")
     return parser.parse_args()
 
 
@@ -205,7 +213,8 @@ def collect_ood_samples(ood_root, class_to_idx):
 
     for folder_name in ignored_folders:
         print(
-            f"WARNING: Ignoring OOD folder not present in checkpoint classes: {folder_name}"
+            "WARNING: Ignoring OOD folder not present in checkpoint classes: "
+            f"{folder_name}"
         )
 
     if not samples:
@@ -238,6 +247,20 @@ def print_dataset_info(samples, detected_classes, class_names):
     print("=================================\n")
 
 
+def build_class_distribution(samples, class_names):
+    class_counts = Counter(label for _, label in samples)
+
+    return pd.DataFrame(
+        [
+            {
+                "class_name": class_name,
+                "num_images": class_counts.get(class_idx, 0),
+            }
+            for class_idx, class_name in enumerate(class_names)
+        ]
+    )
+
+
 @torch.inference_mode()
 def run_inference(model, data_loader, device, class_names):
     model.eval()
@@ -247,7 +270,11 @@ def run_inference(model, data_loader, device, class_names):
     all_preds = []
     all_confidences = []
 
-    for images, labels, paths in tqdm(data_loader, desc="OOD inference", mininterval=1.0):
+    for images, labels, paths in tqdm(
+        data_loader,
+        desc="OOD inference",
+        mininterval=1.0,
+    ):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
@@ -274,6 +301,58 @@ def run_inference(model, data_loader, device, class_names):
     )
 
     return predictions, all_labels, all_preds
+
+
+def save_confusion_matrix_image(cm, class_names, output_path):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(14, 14))
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=class_names,
+    )
+    disp.plot(ax=ax, xticks_rotation=90, colorbar=True)
+    plt.title("Confusion Matrix - OOD Set")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close(fig)
+
+
+def build_classification_report_table(labels, preds, class_names):
+    label_ids = list(range(len(class_names)))
+    report = classification_report(
+        labels,
+        preds,
+        labels=label_ids,
+        target_names=class_names,
+        zero_division=0,
+        output_dict=True,
+    )
+
+    rows = []
+    for label, values in report.items():
+        if isinstance(values, dict):
+            rows.append(
+                {
+                    "label": label,
+                    "precision": values.get("precision"),
+                    "recall": values.get("recall"),
+                    "f1_score": values.get("f1-score"),
+                    "support": values.get("support"),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "label": label,
+                    "precision": None,
+                    "recall": None,
+                    "f1_score": values,
+                    "support": len(labels),
+                }
+            )
+
+    return pd.DataFrame(rows)
 
 
 def save_results(
@@ -316,6 +395,7 @@ def save_results(
     predictions_path = output_dir / "ood_predictions.csv"
     summary_path = output_dir / "ood_summary.csv"
     cm_path = output_dir / "ood_confusion_matrix.csv"
+    cm_image_path = output_dir / "ood_confusion_matrix.png"
     report_path = output_dir / "ood_classification_report.txt"
 
     predictions.to_csv(predictions_path, index=False)
@@ -336,6 +416,7 @@ def save_results(
 
     cm_df = pd.DataFrame(cm, index=class_names, columns=class_names)
     cm_df.to_csv(cm_path)
+    save_confusion_matrix_image(cm, class_names, cm_image_path)
 
     report_path.write_text(report, encoding="utf-8")
 
@@ -348,8 +429,96 @@ def save_results(
         "predictions_path": predictions_path,
         "summary_path": summary_path,
         "cm_path": cm_path,
+        "cm_image_path": cm_image_path,
         "report_path": report_path,
     }
+
+
+def build_wandb_config(args, device, class_names, detected_classes, samples):
+    class_distribution = build_class_distribution(samples, class_names)
+
+    return {
+        "ood_root": args.ood_root,
+        "checkpoint_path": args.checkpoint_path,
+        "model_name": args.model_name,
+        "image_size": args.image_size,
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "output_dir": args.output_dir,
+        "device": str(device),
+        "num_images": len(samples),
+        "num_classes": len(class_names),
+        "class_names": class_names,
+        "detected_classes": detected_classes,
+        "class_distribution": class_distribution.to_dict(orient="records"),
+        "use_top_k_classes": False,
+        "use_class_grouping": False,
+    }
+
+
+def init_wandb(args, device, class_names, detected_classes, samples):
+    if args.disable_wandb:
+        return None
+
+    checkpoint_name = Path(args.checkpoint_path).stem
+    run_name = args.wandb_run_name or f"ood_exp27_{checkpoint_name}"
+
+    return wandb.init(
+        project=args.wandb_project,
+        name=run_name,
+        config=build_wandb_config(
+            args=args,
+            device=device,
+            class_names=class_names,
+            detected_classes=detected_classes,
+            samples=samples,
+        ),
+    )
+
+
+def log_ood_to_wandb(metrics, predictions, labels, preds, class_names, samples):
+    if wandb.run is None:
+        return
+
+    class_distribution = build_class_distribution(samples, class_names)
+    classification_report_table = build_classification_report_table(
+        labels=labels,
+        preds=preds,
+        class_names=class_names,
+    )
+
+    wandb.log(
+        {
+            "ood/accuracy": metrics["accuracy"],
+            "ood/macro_f1": metrics["macro_f1"],
+            "ood/weighted_f1": metrics["weighted_f1"],
+            "ood/num_images": metrics["num_images"],
+            "ood/num_classes": metrics["num_classes"],
+            "ood/confusion_matrix": wandb.Image(str(metrics["cm_image_path"])),
+            "ood/predictions": wandb.Table(dataframe=predictions),
+            "ood/class_distribution": wandb.Table(dataframe=class_distribution),
+            "ood/classification_report": wandb.Table(
+                dataframe=classification_report_table
+            ),
+        }
+    )
+
+    wandb.summary.update(
+        {
+            "ood_accuracy": metrics["accuracy"],
+            "ood_macro_f1": metrics["macro_f1"],
+            "ood_weighted_f1": metrics["weighted_f1"],
+        }
+    )
+
+    artifact = wandb.Artifact(
+        name=f"ood-results-{wandb.run.id}",
+        type="ood-evaluation",
+    )
+    for path_key in ("predictions_path", "summary_path", "cm_path", "report_path"):
+        artifact.add_file(str(metrics[path_key]))
+    artifact.add_file(str(metrics["cm_image_path"]))
+    wandb.log_artifact(artifact)
 
 
 def print_final_summary(metrics):
@@ -364,6 +533,7 @@ def print_final_summary(metrics):
     print(f"Predictions saved to: {metrics['predictions_path']}")
     print(f"Summary saved to: {metrics['summary_path']}")
     print(f"Confusion matrix saved to: {metrics['cm_path']}")
+    print(f"Confusion matrix image saved to: {metrics['cm_image_path']}")
     print(f"Classification report saved to: {metrics['report_path']}")
 
 
@@ -383,43 +553,62 @@ def main():
 
     samples, detected_classes = collect_ood_samples(args.ood_root, class_to_idx)
     print_dataset_info(samples, detected_classes, class_names)
-
-    transform = build_inference_transform(args.image_size)
-    dataset = OODFolderDataset(samples=samples, transform=transform)
-    data_loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    model = create_resnet_model(
-        num_classes=27,
-        model_name=args.model_name,
-        feature_extraction=False,
-        partial_finetuning=True,
-        unfreeze_layer3=False,
-    )
-    model = load_exp27_checkpoint(model, checkpoint, args.checkpoint_path)
-    model = model.to(device)
-
-    predictions, labels, preds = run_inference(
-        model=model,
-        data_loader=data_loader,
+    wandb_run = init_wandb(
+        args=args,
         device=device,
         class_names=class_names,
+        detected_classes=detected_classes,
+        samples=samples,
     )
 
-    metrics = save_results(
-        output_dir=args.output_dir,
-        checkpoint_path=args.checkpoint_path,
-        class_names=class_names,
-        predictions=predictions,
-        labels=labels,
-        preds=preds,
-    )
-    print_final_summary(metrics)
+    try:
+        transform = build_inference_transform(args.image_size)
+        dataset = OODFolderDataset(samples=samples, transform=transform)
+        data_loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+        model = create_resnet_model(
+            num_classes=27,
+            model_name=args.model_name,
+            feature_extraction=False,
+            partial_finetuning=True,
+            unfreeze_layer3=False,
+        )
+        model = load_exp27_checkpoint(model, checkpoint, args.checkpoint_path)
+        model = model.to(device)
+
+        predictions, labels, preds = run_inference(
+            model=model,
+            data_loader=data_loader,
+            device=device,
+            class_names=class_names,
+        )
+
+        metrics = save_results(
+            output_dir=args.output_dir,
+            checkpoint_path=args.checkpoint_path,
+            class_names=class_names,
+            predictions=predictions,
+            labels=labels,
+            preds=preds,
+        )
+        log_ood_to_wandb(
+            metrics=metrics,
+            predictions=predictions,
+            labels=labels,
+            preds=preds,
+            class_names=class_names,
+            samples=samples,
+        )
+        print_final_summary(metrics)
+    finally:
+        if wandb_run is not None:
+            wandb.finish()
 
 
 if __name__ == "__main__":
