@@ -1,120 +1,142 @@
 # WikiArt Style Classification
 
-Projecte de classificació d'estils artístics amb WikiArt. El model principal és una ResNet50 preentrenada a ImageNet i adaptada al nombre de classes del nostre problema.
+Deep Learning project for artistic style classification using transfer learning with ResNet50 and PyTorch.
 
-## Estructura
+The objective of this project was not only to obtain good classification performance, but also to understand how different training strategies affect the behaviour of the model through a sequence of controlled experiments.
 
-```text
-main.py                         # entrenament principal
-train.py                        # bucle train/validation i checkpoints
-test.py                         # avaluació final sobre test
-models/transfer_model.py        # ResNet50 amb transfer learning
-utils/data_utils.py             # càrrega, split, transforms i balanceig
-utils/dataset.py                # Dataset PyTorch
-scripts/check_ood_duplicates.py # duplicats exactes/visuals OOD vs WikiArt
-scripts/evaluate_ood_folder_exp27.py # avaluació OOD del checkpoint EXP27
-results/                        # checkpoints, figures i mètriques
-```
+<p align="center">
+  <img src="assets/confusion_matrix.png" width="850">
+</p>
 
-Els scripts antics que no formen part del flux final són a `scripts/archive/`.
+---
 
-## Dependències
+## Overview
 
-```bash
-conda env create -f environment.yml
-conda activate wikiart-classification
-```
+The model classifies paintings into one of **27 artistic styles** from the WikiArt dataset.
+
+Instead of performing an extensive hyperparameter search, the project follows an experimental approach where each modification is motivated by the results of previous experiments. This allows understanding why certain techniques improve (or worsen) the final performance.
+
+The project explores topics such as:
+
+- Transfer Learning
+- Fine-tuning strategies
+- Class imbalance handling
+- Data augmentation
+- Image resolution
+- Duplicate detection
+- Out-of-Distribution (OOD) evaluation
+
+---
 
 ## Dataset
 
-El dataset WikiArt s'espera organitzat en carpetes, una per estil:
+- **Dataset:** WikiArt
+- **Images:** ~81,000
+- **Classes:** 27 artistic styles
 
-```text
-/home/datasets/wikiart/
-    Impressionism/
-    Realism/
-    ...
+The dataset is highly imbalanced, with some artistic styles containing thousands of paintings while others contain only a few hundred. Several techniques were evaluated to reduce the impact of this imbalance during training.
+
+An additional **external OOD dataset** was also created manually using paintings collected outside WikiArt in order to evaluate how well the model generalizes to unseen data.
+
+---
+
+## Model
+
+The final model is based on a pretrained **ResNet50**.
+
+Training pipeline:
+
+```
+Image
+   │
+Resize / Padding / Crop
+   │
+Data Augmentation
+   │
+Normalization
+   │
+ResNet50
+   │
+Global Average Pooling
+   │
+Fully Connected Layer
+   │
+27 Style Predictions
 ```
 
-El dataset extern OOD també va per carpetes i usa les 27 classes originals:
+The model is trained using **CrossEntropyLoss**, together with label smoothing and soft class weights.
 
-```text
-data/ood_art_external/
-    Abstract_Expressionism/
-    Action_painting/
-    ...
+---
+
+## Experiments
+
+The project was organised as a sequence of experiments rather than isolated changes.
+
+Some of the most relevant experiments include:
+
+- Baseline with ResNet18
+- Feature extraction vs. fine-tuning
+- Partial backbone unfreezing
+- Different strategies for handling class imbalance
+- Data augmentation
+- Higher input resolution
+- Duplicate image detection
+- Out-of-Distribution (OOD) evaluation using an external dataset
+- Grouping visually similar artistic styles
+
+---
+
+## Results
+
+The best model achieved approximately:
+
+| Metric | Value |
+|---------|------:|
+| Accuracy | ~0.69 |
+| Macro F1 | ~0.69 |
+
+The external OOD evaluation obtained similar performance, showing that the model was able to generalize reasonably well to paintings outside the original WikiArt dataset.
+
+---
+
+## Repository Structure
+
+```
+models/
+scripts/
+utils/
+data/
+train.py
+test.py
+main.py
 ```
 
-## Entrenament
+---
 
-`main.py` conté la config de l'experiment principal EXP27: ResNet50, 27 classes, imatge 384, fine-tuning parcial, class weights, label smoothing i scheduler per validation macro F1.
+## Technologies
 
-```bash
-python main.py
-```
+- Python
+- PyTorch
+- Torchvision
+- NumPy
+- Pandas
+- Weights & Biases
 
-Per reproduir variants explicades a la presentació, canvia només els flags de la config: `use_top_k_classes`, `use_class_grouping`, `feature_extraction`, `partial_finetuning`, `unfreeze_layer3`, `use_weighted_sampler` o el mode de cache d'aspect ratio.
+---
 
-Per defecte:
+## Future Work
 
-```python
-use_top_k_classes = False
-use_class_grouping = False
-class_groups = {}
-```
+Possible future improvements include:
 
-## Avaluació OOD
+- Vision Transformers (ViT)
+- Grad-CAM visualizations
+- Larger OOD datasets
+- Self-supervised pretraining
 
-Aquest script només fa inferència sobre el dataset extern. No entrena, no agrupa classes i no aplica top-k.
+---
 
-```bash
-python scripts/evaluate_ood_folder_exp27.py \
-  --ood_root data/ood_art_external \
-  --checkpoint_path results/checkpoints/exp27_resnet50_384_all_classes_best.pth \
-  --image_size 384 \
-  --batch_size 16 \
-  --num_workers 4 \
-  --output_dir results/ood_exp27
-```
+## Author
 
-Resultats:
+Martí Gasol Cos
 
-```text
-results/ood_exp27/ood_predictions.csv
-results/ood_exp27/ood_summary.csv
-results/ood_exp27/ood_confusion_matrix.csv
-results/ood_exp27/ood_classification_report.txt
-```
-
-## Duplicats OOD
-
-Comprova duplicats exactes i possibles duplicats visuals entre WikiArt i l'OOD. No elimina fitxers.
-
-```bash
-python scripts/check_ood_duplicates.py \
-  --original_root /home/datasets/wikiart \
-  --ood_root data/ood_art_external \
-  --output_dir results/ood_duplicate_check \
-  --visual_threshold 5
-```
-
-Resultats:
-
-```text
-results/ood_duplicate_check/exact_duplicates.csv
-results/ood_duplicate_check/visual_duplicates.csv
-results/ood_duplicate_check/ood_class_distribution_without_visual_duplicates.csv
-results/ood_duplicate_check/summary.txt
-```
-
-## Experiments principals
-
-- Top-14 classes per reduir desbalanceig inicial.
-- Comparació amb les 27 classes originals.
-- Feature extraction vs fine-tuning parcial.
-- Descongelar més capes amb `unfreeze_layer3`.
-- Class weights i weighted sampler per tractar el desbalanceig.
-- Augment de resolució a 384.
-- Preprocessing amb resize quadrat i proves d'aspect ratio.
-- Agrupació de classes només quan `use_class_grouping=True`.
-- Avaluació OOD amb un mini dataset extern.
+Data Engineering Student · Universitat Autònoma de Barcelona
