@@ -99,20 +99,6 @@ The external OOD evaluation obtained similar performance, showing that the model
 
 ---
 
-## Repository Structure
-
-```
-models/
-scripts/
-utils/
-data/
-train.py
-test.py
-main.py
-```
-
----
-
 ## Technologies
 
 - Python
@@ -122,21 +108,3 @@ main.py
 - Pandas
 - Weights & Biases
 
----
-
-## Future Work
-
-Possible future improvements include:
-
-- Vision Transformers (ViT)
-- Grad-CAM visualizations
-- Larger OOD datasets
-- Self-supervised pretraining
-
----
-
-## Author
-
-Martí Gasol Cos
-
-Data Engineering Student · Universitat Autònoma de Barcelona
